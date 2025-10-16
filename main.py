@@ -6,7 +6,7 @@ import json
 import time
 import server
 
-# Initialize pygame
+
 pygame.init()
 
 # Constants
