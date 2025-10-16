@@ -4,9 +4,8 @@ import socket
 import threading
 import json
 import time
-import server
 
-
+# Initialize pygame
 pygame.init()
 
 # Constants
@@ -262,17 +261,29 @@ class Network:
         self.server = "localhost"
         self.port = PORT
         self.addr = (self.server, self.port)
-        self.id = self.connect()
+        self.id = None
+        self.connected = False
 
     def connect(self):
         try:
             self.client.connect(self.addr)
-            return self.client.recv(2048).decode()
-        except:
-            pass
+            self.connected = True
+            # Receive initial connection message
+            message_header = self.client.recv(HEADER_SIZE).decode()
+            if message_header:
+                message_length = int(message_header.strip())
+                message_data = self.client.recv(message_length).decode()
+                return json.loads(message_data)
+        except Exception as e:
+            print(f"Connection error: {e}")
+            self.connected = False
+            return None
 
     def send(self, data):
         try:
+            if not self.connected:
+                return None
+                
             # Serialize data to JSON string
             json_data = json.dumps(data)
             # Add header with message length
@@ -286,7 +297,8 @@ class Network:
                 response_data = self.client.recv(response_length).decode()
                 return json.loads(response_data)
         except socket.error as e:
-            print(e)
+            print(f"Send error: {e}")
+            self.connected = False
             return None
 
 class Game:
@@ -334,8 +346,7 @@ class Game:
             move_data = {
                 'type': 'move',
                 'from': (self.selected.row, self.selected.col),
-                'to': (row, col),
-                'skipped': [(p.row, p.col) for p in self.valid_moves[(row, col)]]
+                'to': (row, col)
             }
             
             response = self.network.send(move_data)
@@ -381,9 +392,6 @@ class Game:
         else:
             self.turn = RED
 
-    def get_board(self):
-        return self.board
-
     def receive_updates(self):
         while True:
             try:
@@ -397,11 +405,6 @@ class Game:
                         self.board.deserialize(response['board'])
                         self.turn = tuple(response['turn']) if isinstance(response['turn'], list) else response['turn']
                         self.connected = True
-                        
-                        # Check if game ended
-                        winner = self.board.winner()
-                        if winner:
-                            return winner
                     
                     elif response.get('type') == 'player_assignment':
                         self.player_color = tuple(response['color']) if isinstance(response['color'], list) else response['color']
@@ -481,20 +484,22 @@ def draw_connection_screen(win):
 def get_ip_input(win):
     input_ip = "localhost"
     font = pygame.font.SysFont('Arial', 36)
+    input_active = True
     
-    while True:
+    while input_active:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
+                    input_active = False
                     return input_ip
                 elif event.key == pygame.K_BACKSPACE:
                     input_ip = input_ip[:-1]
                 else:
-                    # Only allow numbers, dots, and localhost
-                    if event.unicode.isdigit() or event.unicode == '.' or (event.unicode.isalpha() and input_ip == "localhos"):
+                    # Only allow numbers, dots, and letters for localhost
+                    if event.unicode.isdigit() or event.unicode == '.' or event.unicode.isalpha():
                         input_ip += event.unicode
         
         win.fill(BLACK)
@@ -506,6 +511,11 @@ def get_ip_input(win):
         
         pygame.display.update()
 
+def start_server():
+    """Start the checkers server in a separate thread"""
+    import server
+    server.start_server()
+
 def main():
     win = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption('Checkers - LAN Multiplayer')
@@ -514,6 +524,9 @@ def main():
     
     # Show menu
     menu = True
+    network = None
+    game = None
+    
     while menu:
         draw_menu(win)
         
@@ -525,28 +538,46 @@ def main():
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_1:
                     # Host game
-
                     local_ip = get_local_ip()
                     
                     # Start server in a separate thread
-                    server_thread = threading.Thread(target=server.start_server)
+                    server_thread = threading.Thread(target=start_server)
                     server_thread.daemon = True
                     server_thread.start()
                     
+                    # Wait a moment for server to start
+                    time.sleep(1)
+                    
                     draw_waiting_screen(win, is_host=True, ip=local_ip)
                     
-                    # Connect to local server as player 1
+                    # Connect to local server as player
                     network = Network()
-                    game = Game(win, network)
+                    response = network.connect()
                     
-                    # Wait for another player to connect
-                    while True:
-                        response = network.send({'type': 'get_state'})
-                        if response and response.get('players_connected') == 2:
-                            break
-                        time.sleep(1)
-                    
-                    menu = False
+                    if response and network.connected:
+                        game = Game(win, network)
+                        
+                        # Wait for another player to connect
+                        waiting = True
+                        while waiting:
+                            for event in pygame.event.get():
+                                if event.type == pygame.QUIT:
+                                    pygame.quit()
+                                    sys.exit()
+                            
+                            response = network.send({'type': 'get_state'})
+                            if response and response.get('players_connected') == 2:
+                                waiting = False
+                            else:
+                                draw_waiting_screen(win, is_host=True, ip=local_ip)
+                                pygame.display.update()
+                            
+                            time.sleep(1)
+                        
+                        menu = False
+                    else:
+                        print("Failed to connect to local server")
+                        # Return to menu on connection failure
                     
                 elif event.key == pygame.K_2:
                     # Join game
@@ -558,13 +589,27 @@ def main():
                     network.server = server_ip
                     network.addr = (server_ip, PORT)
                     
-                    try:
-                        network.id = network.connect()
+                    response = network.connect()
+                    if response and network.connected:
                         game = Game(win, network)
                         menu = False
-                    except:
+                    else:
                         print("Failed to connect to server")
-                        # Return to menu on connection failure
+                        # Show error and return to menu
+                        error_font = pygame.font.SysFont('Arial', 30)
+                        error_text = error_font.render('Connection failed! Press any key to return to menu', True, RED)
+                        win.blit(error_text, (WIDTH // 2 - error_text.get_width() // 2, HEIGHT // 2 + 50))
+                        pygame.display.update()
+                        
+                        # Wait for key press
+                        waiting = True
+                        while waiting:
+                            for event in pygame.event.get():
+                                if event.type == pygame.QUIT:
+                                    pygame.quit()
+                                    sys.exit()
+                                if event.type == pygame.KEYDOWN:
+                                    waiting = False
                 
                 elif event.key == pygame.K_3:
                     pygame.quit()
@@ -573,44 +618,44 @@ def main():
         clock.tick(60)
     
     # Start game
-    winner = None
-    
-    # Start thread to receive game updates
-    update_thread = threading.Thread(target=game.receive_updates)
-    update_thread.daemon = True
-    update_thread.start()
-    
-    while True:
-        clock.tick(60)
+    if game and network.connected:
+        # Start thread to receive game updates
+        update_thread = threading.Thread(target=game.receive_updates)
+        update_thread.daemon = True
+        update_thread.start()
         
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
+        running = True
+        while running:
+            clock.tick(60)
             
-            if event.type == pygame.MOUSEBUTTONDOWN and game.connected:
-                pos = pygame.mouse.get_pos()
-                col, row = pos[0] // SQUARE_SIZE, pos[1] // SQUARE_SIZE
-                game.select(row, col)
-        
-        game.update()
-        
-        # Check for winner from the update thread
-        current_winner = game.board.winner()
-        if current_winner:
-            winner = current_winner
-            break
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                
+                if event.type == pygame.MOUSEBUTTONDOWN and game.connected:
+                    pos = pygame.mouse.get_pos()
+                    col, row = pos[0] // SQUARE_SIZE, pos[1] // SQUARE_SIZE
+                    if 0 <= row < ROWS and 0 <= col < COLS:
+                        game.select(row, col)
+            
+            game.update()
+            
+            # Check for winner
+            winner = game.board.winner()
+            if winner:
+                font = pygame.font.SysFont('Arial', 50)
+                if winner == RED:
+                    text = font.render('Red Wins!', True, RED)
+                else:
+                    text = font.render('White Wins!', True, WHITE)
+                
+                win.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT // 2 - text.get_height() // 2))
+                pygame.display.update()
+                pygame.time.delay(5000)
+                running = False
     
-    # Display winner
-    font = pygame.font.SysFont('Arial', 50)
-    if winner == RED:
-        text = font.render('Red Wins!', True, RED)
-    else:
-        text = font.render('White Wins!', True, WHITE)
-    
-    win.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT // 2 - text.get_height() // 2))
-    pygame.display.update()
-    pygame.time.delay(5000)
+    pygame.quit()
+    sys.exit()
 
 if __name__ == "__main__":
     main()

@@ -24,11 +24,41 @@ class CheckersServer:
         self.initialize_game()
         
     def initialize_game(self):
-        # Create initial board state
-        from game import Board  # Import here to avoid circular imports
-        board = Board()
-        self.game_state['board'] = board.serialize()
+        # Create initial board state using the same Board class logic
+        board = self.create_initial_board()
+        self.game_state['board'] = board
         self.game_state['players_connected'] = 0
+        
+    def create_initial_board(self):
+        # Create the initial board configuration
+        board = []
+        RED = (255, 0, 0)
+        WHITE = (255, 255, 255)
+        
+        for row in range(8):
+            board_row = []
+            for col in range(8):
+                if col % 2 == ((row + 1) % 2):
+                    if row < 3:
+                        board_row.append({
+                            'color': WHITE,
+                            'king': False,
+                            'row': row,
+                            'col': col
+                        })
+                    elif row > 4:
+                        board_row.append({
+                            'color': RED,
+                            'king': False,
+                            'row': row,
+                            'col': col
+                        })
+                    else:
+                        board_row.append(None)
+                else:
+                    board_row.append(None)
+            board.append(board_row)
+        return board
         
     def handle_client(self, conn, addr, player_id):
         print(f"New connection from {addr}, player {player_id}")
@@ -63,7 +93,8 @@ class CheckersServer:
                 break
         
         # Remove player on disconnect
-        self.players[player_id] = None
+        if player_id < len(self.players):
+            self.players[player_id] = None
         self.game_state['players_connected'] = len([p for p in self.players if p is not None])
         print(f"Player {player_id} disconnected")
         conn.close()
@@ -85,37 +116,36 @@ class CheckersServer:
             if self.game_state['turn'] != current_player_color:
                 return {'status': 'error', 'message': 'Not your turn'}
             
-            # Process the move (in a real implementation, you'd validate the move)
+            # Process the move
             from_row, from_col = data['from']
             to_row, to_col = data['to']
             
-            # Update game state
-            from game import Board
-            board = Board()
-            board.deserialize(self.game_state['board'])
+            # Update the board state
+            board = self.game_state['board']
             
-            # Find the piece and move it
-            piece = board.get_piece(from_row, from_col)
-            if piece and piece.color == current_player_color:
-                board.move(piece, to_row, to_col)
-                
-                # Remove skipped pieces
-                skipped_positions = data.get('skipped', [])
-                skipped_pieces = []
-                for row, col in skipped_positions:
-                    skipped_piece = board.get_piece(row, col)
-                    if skipped_piece:
-                        skipped_pieces.append(skipped_piece)
-                if skipped_pieces:
-                    board.remove(skipped_pieces)
-                
-                # Update turn
-                self.game_state['turn'] = (255, 255, 255) if self.game_state['turn'] == (255, 0, 0) else (255, 0, 0)
-                self.game_state['board'] = board.serialize()
-                
-                return {'status': 'success'}
-            else:
-                return {'status': 'error', 'message': 'Invalid move'}
+            # Get the piece being moved
+            piece_data = board[from_row][from_col]
+            if not piece_data or piece_data['color'] != current_player_color:
+                return {'status': 'error', 'message': 'Invalid piece'}
+            
+            # Move the piece
+            board[to_row][to_col] = {
+                'color': piece_data['color'],
+                'king': piece_data['king'],
+                'row': to_row,
+                'col': to_col
+            }
+            board[from_row][from_col] = None
+            
+            # Check for king promotion
+            if (current_player_color == (255, 0, 0) and to_row == 0) or \
+               (current_player_color == (255, 255, 255) and to_row == 7):
+                board[to_row][to_col]['king'] = True
+            
+            # Update turn
+            self.game_state['turn'] = (255, 255, 255) if self.game_state['turn'] == (255, 0, 0) else (255, 0, 0)
+            
+            return {'status': 'success'}
         
         return {'status': 'unknown_command'}
     
@@ -152,6 +182,11 @@ class CheckersServer:
                     thread = threading.Thread(target=self.handle_client, args=(conn, addr, player_id))
                     thread.daemon = True
                     thread.start()
+                    print(f"Player {player_id} connected. Total players: {self.game_state['players_connected']}")
+                    
+                    # Start game when both players are connected
+                    if self.game_state['players_connected'] == 2:
+                        print("Both players connected! Starting game...")
                 else:
                     print("Game is full, rejecting connection")
                     conn.close()
