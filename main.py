@@ -499,7 +499,7 @@ def get_ip_input(win):
                     input_ip = input_ip[:-1]
                 else:
                     # Only allow numbers, dots, and letters for localhost
-                    if event.unicode.isdigit() or event.unicode == '.' or event.unicode.isalpha():
+                    if event.unicode.isdigit() or event.unicode == '.'  or event.unicode == ':' or event.unicode.isalpha():
                         input_ip += event.unicode
         
         win.fill(BLACK)
